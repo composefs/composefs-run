@@ -1,9 +1,9 @@
 use std::fs;
-use std::io::Read;
 use std::os::fd::FromRawFd;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::Command;
+use std::sync::Arc;
 
 use anyhow::{Context, Result, ensure};
 use clap::Parser;
@@ -91,13 +91,7 @@ fn run_server_typed<ObjectID: FsVerityHashValue>(args: &FuseServeArgs) -> Result
     let (image_fd, _) = repo
         .open_image(&args.image)
         .context("Opening EROFS image")?;
-    let mut image_data = Vec::new();
-    std::fs::File::from(image_fd)
-        .read_to_end(&mut image_data)
-        .context("Reading EROFS image")?;
-
-    let filesystem = composefs::erofs::reader::erofs_to_filesystem::<ObjectID>(&image_data)
-        .context("Parsing EROFS image")?;
+    let objects_fd = Arc::new(repo.objects_dir()?.try_clone()?);
 
     let fd_path =
         fs::read_link(format!("/proc/self/fd/{}", args.fuse_fd)).context("Invalid --fuse-fd")?;
@@ -109,7 +103,10 @@ fn run_server_typed<ObjectID: FsVerityHashValue>(args: &FuseServeArgs) -> Result
     );
     let dev_fuse = unsafe { std::os::fd::OwnedFd::from_raw_fd(args.fuse_fd) };
 
-    composefs_fuse::serve_tree_fuse(dev_fuse, &filesystem, &repo).context("FUSE server error")?;
+    let mut serve_options = composefs_fuse::ServeFuseOptions::default();
+    serve_options.set_overlay_xattr(Some(composefs_fuse::OverlayXattrMode::User));
+    composefs_fuse::serve_fuse_fd(dev_fuse, image_fd, objects_fd, &serve_options)
+        .context("FUSE server error")?;
 
     Ok(())
 }

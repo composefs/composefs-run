@@ -60,14 +60,7 @@ pub fn run(
         // --rootfs: skip composefs, use the directory directly
         mount_rootfs_from_path(rootfs, &rootfs_dir, overlay_dir, cli.read_only, rootless)?;
     } else if rootless {
-        mount_rootfs_with_fuse(
-            repo_path,
-            image,
-            &rootfs_dir,
-            container_dir,
-            overlay_dir,
-            cli.read_only,
-        )?;
+        mount_rootfs_with_fuse(repo_path, image, &rootfs_dir, overlay_dir, cli.read_only)?;
     } else {
         mount_rootfs_with_erofs(repo_path, image, &rootfs_dir, overlay_dir, cli.read_only)?;
     }
@@ -196,40 +189,53 @@ fn mount_rootfs_with_fuse(
     repo_path: &Path,
     image: &ResolvedImage,
     rootfs_dir: &Path,
-    container_dir: &Path,
     overlay_dir: &Path,
     read_only: bool,
 ) -> Result<()> {
     let dev_fuse = composefs_fuse::open_fuse().context("Opening /dev/fuse")?;
     let fuse_fd_num = dev_fuse.as_raw_fd();
 
-    let fuse_mount_fd =
-        composefs_fuse::mount_fuse(&dev_fuse, &composefs_fuse::FuseMountOptions::default())
-            .context("Creating FUSE mount")?;
+    let fuse_options = composefs_fuse::FuseMountOptions::default();
+    let fuse_mnt =
+        composefs_fuse::mount_fuse(&dev_fuse, &fuse_options).context("Creating FUSE mount")?;
 
     let erofs_hex = image.erofs_hex.as_deref().context("No composefs image")?;
     fuse::spawn_server(repo_path, erofs_hex, fuse_fd_num)?;
 
-    if read_only {
-        composefs::mount::mount_at(fuse_mount_fd, CWD, rootfs_dir)
-            .context("Attaching FUSE mount at rootfs")?;
-    } else {
-        let fuse_lower = container_dir.join("fuse-lower");
-        fs::create_dir(&fuse_lower)?;
-        composefs::mount::mount_at(fuse_mount_fd, CWD, &fuse_lower)
-            .context("Attaching FUSE mount")?;
+    let basedir = rustix::fs::open(
+        repo_path.join("objects"),
+        OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .context("Opening repository objects directory")?;
 
-        mount_overlay(
-            &fuse_lower.display().to_string(),
-            rootfs_dir,
-            overlay_dir,
-            true,
+    let mut overlay_options = composefs_fuse::OverlayMountOptions::default();
+
+    if !read_only {
+        let upper = overlay_dir.join("upper");
+        let work = overlay_dir.join("work");
+        fs::create_dir(&upper).with_context(|| format!("Creating {}", upper.display()))?;
+        fs::create_dir(&work).with_context(|| format!("Creating {}", work.display()))?;
+
+        let upper_fd = rustix::fs::open(
+            &upper,
+            OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
         )?;
-
-        rustix::mount::unmount(&fuse_lower, rustix::mount::UnmountFlags::DETACH)
-            .context("Unmounting temporary FUSE lower")?;
-        fs::remove_dir(&fuse_lower).ok();
+        let work_fd = rustix::fs::open(
+            &work,
+            OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )?;
+        overlay_options.set_overlay(upper_fd, work_fd);
+        overlay_options.set_read_write(true);
     }
+
+    let mount_fd = composefs_fuse::mount_fuse_overlay(fuse_mnt, basedir, &overlay_options)
+        .context("Creating overlay mount")?;
+
+    composefs::mount::mount_at(mount_fd, CWD, rootfs_dir)
+        .context("Attaching overlay mount at rootfs")?;
     Ok(())
 }
 
