@@ -544,7 +544,7 @@ fn resolve_image_typed<ObjectID: FsVerityHashValue>(
     };
 
     let erofs_id = img
-        .image_ref()
+        .image_ref(composefs::erofs::format::FormatVersion::default())
         .context("Image has no EROFS — try re-pulling")?;
 
     let config = composefs_oci::open_config(repo, img.config_digest(), Some(img.config_verity()))?;

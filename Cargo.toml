@@ -7,6 +7,6 @@ edition = "2024"
 license = "Apache-2.0 OR MIT"
 
 [workspace.dependencies]
-composefs = { git = "https://github.com/containers/composefs-rs", branch = "main" }
-composefs-fuse = { git = "https://github.com/containers/composefs-rs", branch = "main" }
-composefs-oci = { git = "https://github.com/containers/composefs-rs", branch = "main" }
+composefs = { git = "https://github.com/composefs/composefs-rs.git" }
+composefs-fuse = { git = "https://github.com/composefs/composefs-rs.git" }
+composefs-oci = { git = "https://github.com/composefs/composefs-rs.git" }
