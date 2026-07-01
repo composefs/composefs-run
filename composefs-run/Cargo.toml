@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow = { version = "1.0", default-features = false }
 clap = { version = "4.5", default-features = false, features = ["std", "help", "usage", "derive"] }
+clap_complete = { version = "4.5", default-features = false, features = ["unstable-dynamic"] }
 composefs = { workspace = true }
 composefs-fuse = { workspace = true }
 composefs-oci = { workspace = true }
