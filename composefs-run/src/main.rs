@@ -10,7 +10,7 @@ mod userns;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, ensure};
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 use composefs::fsverity::{FsVerityHashValue, Sha256HashValue, Sha512HashValue};
 use composefs::repository::{Repository, read_repo_algorithm};
 use composefs_oci::OciDigest;
@@ -411,6 +411,8 @@ pub(crate) struct Cli {
 }
 
 fn main() -> Result<()> {
+    clap_complete::CompleteEnv::with_factory(Cli::command).complete();
+
     match std::env::args().nth(1).as_deref() {
         Some("--internal-cleanup") => return run::cleanup(),
         Some("--internal-fuse-serve") => {
