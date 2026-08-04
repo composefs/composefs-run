@@ -1,4 +1,6 @@
 # composefs-run
+[![FOSSA Status](https://app.fossa.com/api/projects/git%2Bgithub.com%2Fcomposefs%2Fcomposefs-run.svg?type=shield)](https://app.fossa.com/projects/git%2Bgithub.com%2Fcomposefs%2Fcomposefs-run?ref=badge_shield)
+
 
 **NOTE**: This is currently a proof of concept, and not intended for
 production use
@@ -82,3 +84,6 @@ just cfsctl=/path/to/cfsctl test
 ### License
 
 Apache-2.0 OR MIT
+
+
+[![FOSSA Status](https://app.fossa.com/api/projects/git%2Bgithub.com%2Fcomposefs%2Fcomposefs-run.svg?type=large)](https://app.fossa.com/projects/git%2Bgithub.com%2Fcomposefs%2Fcomposefs-run?ref=badge_large)
