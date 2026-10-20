@@ -79,6 +79,25 @@ fn basic_echo() {
 }
 
 #[test]
+fn root_directory_access() {
+    for read_only in [false, true] {
+        let mut cmd = cfsrun();
+        if read_only {
+            cmd.arg("--read-only");
+        }
+        let output = run_ok(cmd.arg(IMAGE).args(["--", "ls", "-1", "/"]));
+        assert!(stdout(&output).lines().any(|entry| entry == "usr"));
+    }
+    let output = run_ok(cfsrun().arg(IMAGE).args([
+        "--",
+        "sh",
+        "-c",
+        "mkdir /cfsrun-test && echo writable > /cfsrun-test/file && cat /cfsrun-test/file",
+    ]));
+    assert_eq!(stdout(&output).trim(), "writable");
+}
+
+#[test]
 fn exit_code() {
     let output = cfsrun()
         .arg(IMAGE)

@@ -1,5 +1,21 @@
 use std::path::Path;
 
+use anyhow::{Context, Result};
+
+/// Apply the container's file label to a path when SELinux labeling is enabled.
+pub fn label_path(path: &Path, label: Option<&str>) -> Result<()> {
+    if let Some(label) = label {
+        rustix::fs::lsetxattr(
+            path,
+            "security.selinux",
+            label.as_bytes(),
+            rustix::fs::XattrFlags::empty(),
+        )
+        .with_context(|| format!("Labeling {} with {label}", path.display()))?;
+    }
+    Ok(())
+}
+
 /// Generate SELinux process and mount labels.
 /// Returns (process_label, mount_label), both None if SELinux is not enabled.
 pub fn container_labels(label_opts: &[String]) -> (Option<String>, Option<String>) {
