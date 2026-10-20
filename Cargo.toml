@@ -7,6 +7,6 @@ edition = "2024"
 license = "Apache-2.0 OR MIT"
 
 [workspace.dependencies]
-composefs = { version = "0.9.4" }
-composefs-fuse = { version = "0.9.4" }
-composefs-oci = { version = "0.9.4" }
+composefs = { git = "https://github.com/containers/composefs-rs", rev = "3280e06f562c732205bf4d832809ac8a0fde4ad3" }
+composefs-fuse = { git = "https://github.com/containers/composefs-rs", rev = "3280e06f562c732205bf4d832809ac8a0fde4ad3" }
+composefs-oci = { git = "https://github.com/containers/composefs-rs", rev = "3280e06f562c732205bf4d832809ac8a0fde4ad3" }
