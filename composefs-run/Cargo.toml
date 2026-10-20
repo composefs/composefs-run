@@ -21,8 +21,10 @@ libc = { version = "0.2", default-features = false }
 rustix = { version = "1.0.0", default-features = false, features = ["fs", "process", "mount", "pipe"] }
 serde = { version = "1.0", default-features = false, features = ["derive"] }
 serde_json = { version = "1.0", default-features = false, features = ["std"] }
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "net", "time"] }
 
 [dev-dependencies]
+tar = { version = "0.4", default-features = false }
 rustix = { version = "1.0.0", default-features = false, features = ["process"] }
 
 [lints.rust]
