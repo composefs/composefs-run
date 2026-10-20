@@ -7,12 +7,13 @@ mod seccomp;
 mod selinux;
 mod userns;
 
+use std::os::unix::fs::DirBuilderExt;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, ensure};
 use clap::{CommandFactory, Parser};
 use composefs::fsverity::{FsVerityHashValue, Sha256HashValue, Sha512HashValue};
-use composefs::repository::{Repository, read_repo_algorithm};
+use composefs::repository::{Repository, RepositoryConfig, read_repo_algorithm};
 use composefs_oci::OciDigest;
 use rustix::fs::{CWD, Mode, OFlags};
 
@@ -486,12 +487,27 @@ pub(crate) enum ResolvedRepo {
 
 impl ResolvedRepo {
     fn open(repo_path: &std::path::Path) -> Result<Self> {
-        let repo_fd = rustix::fs::open(
+        let repo_fd = match rustix::fs::open(
             repo_path,
             OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
             Mode::empty(),
-        )
-        .with_context(|| format!("Opening repository at {}", repo_path.display()))?;
+        ) {
+            Ok(fd) => fd,
+            Err(rustix::io::Errno::NOENT) => {
+                std::fs::DirBuilder::new()
+                    .recursive(true)
+                    .mode(0o700)
+                    .create(repo_path)
+                    .with_context(|| format!("Creating repository at {}", repo_path.display()))?;
+                let (repo, _) =
+                    Repository::init_path(CWD, repo_path, RepositoryConfig::default())?;
+                return Ok(Self::Sha256(repo));
+            }
+            Err(err) => {
+                return Err(err)
+                    .with_context(|| format!("Opening repository at {}", repo_path.display()));
+            }
+        };
 
         let algorithm = read_repo_algorithm(&repo_fd)?
             .context("No meta.json found — is this a composefs repository?")?;
@@ -560,6 +576,57 @@ fn resolve_image_typed<ObjectID: FsVerityHashValue>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn open_repository() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("cfsrun-repo-test-{}", std::process::id()));
+        std::fs::create_dir(&dir)?;
+        let result = (|| -> Result<()> {
+            let path = dir.join("nested/repo");
+            let supports_verity = Repository::<Sha256HashValue>::init_path(
+                CWD,
+                dir.join("verity-probe"),
+                RepositoryConfig::default(),
+            )
+            .is_ok();
+            if supports_verity {
+                let ResolvedRepo::Sha256(repo) = ResolvedRepo::open(&path)? else {
+                    panic!("expected SHA-256 repository");
+                };
+                assert!(!repo.is_insecure());
+                assert!(path.join("meta.json").is_file());
+                assert!(matches!(ResolvedRepo::open(&path)?, ResolvedRepo::Sha256(_)));
+            } else {
+                // Unsupported filesystems must fail rather than fall back to insecure mode.
+                assert!(ResolvedRepo::open(&path).is_err());
+                assert!(!path.join("meta.json").exists());
+            }
+            assert_eq!(std::fs::metadata(&path)?.permissions().mode() & 0o077, 0);
+
+            let path = dir.join("sha512");
+            Repository::<Sha512HashValue>::init_path(
+                CWD,
+                &path,
+                RepositoryConfig::new(composefs::fsverity::Algorithm::SHA512).set_insecure(),
+            )?;
+            assert!(matches!(ResolvedRepo::open(&path)?, ResolvedRepo::Sha512(_)));
+
+            let path = dir.join("invalid");
+            std::fs::create_dir(&path)?;
+            assert!(ResolvedRepo::open(&path).is_err());
+            assert!(!path.join("meta.json").exists());
+
+            let path = dir.join("file");
+            std::fs::write(&path, "not a directory")?;
+            assert!(ResolvedRepo::open(&path).is_err());
+            assert_eq!(std::fs::read_to_string(&path)?, "not a directory");
+            Ok(())
+        })();
+        std::fs::remove_dir_all(&dir)?;
+        result
+    }
 
     #[test]
     fn parse_device_spec_basic() {
