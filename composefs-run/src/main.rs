@@ -417,6 +417,7 @@ pub(crate) struct Cli {
 }
 
 fn main() -> Result<()> {
+    env_logger::init();
     clap_complete::CompleteEnv::with_factory(Cli::command).complete();
 
     match std::env::args().nth(1).as_deref() {
