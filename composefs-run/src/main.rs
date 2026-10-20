@@ -526,8 +526,7 @@ impl ResolvedRepo {
                     .mode(0o700)
                     .create(repo_path)
                     .with_context(|| format!("Creating repository at {}", repo_path.display()))?;
-                let (repo, _) =
-                    Repository::init_path(CWD, repo_path, RepositoryConfig::default())?;
+                let (repo, _) = Repository::init_path(CWD, repo_path, RepositoryConfig::default())?;
                 return Ok(Self::Sha256(repo));
             }
             Err(err) => {
@@ -624,7 +623,10 @@ mod tests {
             let layout = dir.join("layout");
             let blobs = layout.join("blobs/sha256");
             std::fs::create_dir_all(&blobs)?;
-            std::fs::write(layout.join("oci-layout"), r#"{"imageLayoutVersion":"1.0.0"}"#)?;
+            std::fs::write(
+                layout.join("oci-layout"),
+                r#"{"imageLayoutVersion":"1.0.0"}"#,
+            )?;
             let mut layer = tar::Builder::new(Vec::new());
             let mut header = tar::Header::new_gnu();
             header.set_entry_type(tar::EntryType::Directory);
@@ -634,7 +636,10 @@ mod tests {
             layer.append_data(&mut header, "usr", std::io::empty())?;
             let layer = layer.into_inner()?;
             let layer_digest = composefs_oci::sha256_content_digest(&layer).to_string();
-            std::fs::write(blobs.join(layer_digest.strip_prefix("sha256:").unwrap()), &layer)?;
+            std::fs::write(
+                blobs.join(layer_digest.strip_prefix("sha256:").unwrap()),
+                &layer,
+            )?;
             let repo_path = dir.join("repo");
             Repository::<Sha256HashValue>::init_path(
                 CWD,
@@ -651,7 +656,10 @@ mod tests {
                     "rootfs": {"type": "layers", "diff_ids": [&layer_digest]}
                 }))?;
                 let config_digest = composefs_oci::sha256_content_digest(&config).to_string();
-                std::fs::write(blobs.join(config_digest.strip_prefix("sha256:").unwrap()), &config)?;
+                std::fs::write(
+                    blobs.join(config_digest.strip_prefix("sha256:").unwrap()),
+                    &config,
+                )?;
                 let manifest = serde_json::to_vec(&serde_json::json!({
                     "schemaVersion": 2,
                     "mediaType": "application/vnd.oci.image.manifest.v1+json",
@@ -661,16 +669,29 @@ mod tests {
                         "digest": &layer_digest, "size": layer.len()}]
                 }))?;
                 let digest = composefs_oci::sha256_content_digest(&manifest).to_string();
-                std::fs::write(blobs.join(digest.strip_prefix("sha256:").unwrap()), &manifest)?;
-                std::fs::write(layout.join("index.json"), serde_json::to_vec(&serde_json::json!({
-                    "schemaVersion": 2,
-                    "manifests": [{"mediaType": "application/vnd.oci.image.manifest.v1+json",
-                        "digest": digest, "size": manifest.len()}]
-                }))?)?;
+                std::fs::write(
+                    blobs.join(digest.strip_prefix("sha256:").unwrap()),
+                    &manifest,
+                )?;
+                std::fs::write(
+                    layout.join("index.json"),
+                    serde_json::to_vec(&serde_json::json!({
+                        "schemaVersion": 2,
+                        "manifests": [{"mediaType": "application/vnd.oci.image.manifest.v1+json",
+                            "digest": digest, "size": manifest.len()}]
+                    }))?,
+                )?;
                 let repo = Repository::<Sha256HashValue>::open_path(CWD, &repo_path)?;
                 let image = runtime.block_on(pull_image_typed(repo, &source, "test"))?;
                 assert_eq!(
-                    image.oci_config.config().as_ref().unwrap().cmd().as_ref().unwrap(),
+                    image
+                        .oci_config
+                        .config()
+                        .as_ref()
+                        .unwrap()
+                        .cmd()
+                        .as_ref()
+                        .unwrap(),
                     &[command]
                 );
                 assert!(image.erofs_hex.is_some());
@@ -716,7 +737,10 @@ mod tests {
                 };
                 assert!(!repo.is_insecure());
                 assert!(path.join("meta.json").is_file());
-                assert!(matches!(ResolvedRepo::open(&path)?, ResolvedRepo::Sha256(_)));
+                assert!(matches!(
+                    ResolvedRepo::open(&path)?,
+                    ResolvedRepo::Sha256(_)
+                ));
             } else {
                 // Unsupported filesystems must fail rather than fall back to insecure mode.
                 assert!(ResolvedRepo::open(&path).is_err());
@@ -730,7 +754,10 @@ mod tests {
                 &path,
                 RepositoryConfig::new(composefs::fsverity::Algorithm::SHA512).set_insecure(),
             )?;
-            assert!(matches!(ResolvedRepo::open(&path)?, ResolvedRepo::Sha512(_)));
+            assert!(matches!(
+                ResolvedRepo::open(&path)?,
+                ResolvedRepo::Sha512(_)
+            ));
 
             let path = dir.join("invalid");
             std::fs::create_dir(&path)?;
