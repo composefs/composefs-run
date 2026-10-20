@@ -496,6 +496,7 @@ fn generate_etc_config(
     dns: &[String],
     dns_search: &[String],
     dns_option: &[String],
+    mount_label: Option<&str>,
 ) -> Result<Vec<oci_spec::runtime::Mount>> {
     // /etc/hostname
     let hostname_path = bundle_dir.join("hostname");
@@ -553,6 +554,12 @@ fn generate_etc_config(
     } else {
         let resolv = read_host_resolv_conf();
         fs::write(&resolv_path, &resolv)?;
+    }
+
+    // Bind mounts retain the source inode's label, so label each generated file
+    // with the same context and MCS categories as the container's rootfs.
+    for path in [&hostname_path, &hosts_path, &resolv_path] {
+        selinux::label_path(path, mount_label)?;
     }
 
     let bind_opts = vec!["bind".into(), "rprivate".into()];
@@ -1011,6 +1018,7 @@ fn build_runtime_spec(
         &dns,
         &cli.dns_search,
         &cli.dns_option,
+        mount_label.as_deref(),
     )?;
     mounts.extend(etc_mounts);
 
@@ -1195,6 +1203,52 @@ fn add_device_to_spec(spec: &mut Spec, src: &Path, dst: &Path, perms: &str) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn generated_etc_config() -> Result<()> {
+        let dir = std::env::temp_dir().join(format!("cfsrun-etc-test-{}", std::process::id()));
+        fs::create_dir(&dir)?;
+        let result = (|| -> Result<()> {
+            let (_, label) = selinux::container_labels(&[]);
+            let mounts = generate_etc_config(
+                &dir,
+                "test-host",
+                &[],
+                &["192.0.2.53".into()],
+                &["example.test".into()],
+                &["ndots:1".into()],
+                label.as_deref(),
+            )?;
+            assert_eq!(mounts.len(), 3);
+            for (mount, (name, expected)) in mounts.iter().zip([
+                ("hostname", "test-host\n"),
+                (
+                    "hosts",
+                    "127.0.0.1\tlocalhost\n::1\t\tlocalhost\n127.0.0.1\ttest-host\n",
+                ),
+                (
+                    "resolv.conf",
+                    "nameserver 192.0.2.53\nsearch example.test\noptions ndots:1\n",
+                ),
+            ]) {
+                let path = dir.join(name);
+                assert_eq!(fs::read_to_string(&path)?, expected);
+                assert_eq!(mount.source().as_deref(), Some(path.as_path()));
+                assert_eq!(mount.destination(), &Path::new("/etc").join(name));
+                if let Some(label) = &label {
+                    let mut buffer = [0u8; 256];
+                    let len = rustix::fs::getxattr(&path, "security.selinux", &mut buffer[..])?;
+                    assert_eq!(
+                        std::str::from_utf8(&buffer[..len])?.trim_end_matches('\0'),
+                        label
+                    );
+                }
+            }
+            Ok(())
+        })();
+        fs::remove_dir_all(&dir)?;
+        result
+    }
 
     #[test]
     fn parse_cap_various_formats() {

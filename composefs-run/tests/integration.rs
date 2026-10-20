@@ -189,6 +189,37 @@ fn resolv_conf_dns() {
 }
 
 #[test]
+fn generated_etc_selinux_labels() {
+    if !Path::new("/sys/fs/selinux/enforce").exists() {
+        return;
+    }
+    for read_only in [false, true] {
+        let mut cmd = cfsrun();
+        cmd.args([
+            "--network",
+            "host",
+            "--security-opt",
+            "label=level:s0:c123,c456",
+            "--dns",
+            "192.0.2.53",
+        ]);
+        if read_only {
+            cmd.arg("--read-only");
+        }
+        let output = run_ok(cmd.arg(IMAGE).args([
+            "--",
+            "sh",
+            "-ec",
+            "for path in /etc/hostname /etc/hosts /etc/resolv.conf; do ls -Zd \"$path\"; cat \"$path\" > /dev/null; done",
+        ]));
+        let expected = ["/etc/hostname", "/etc/hosts", "/etc/resolv.conf"]
+            .map(|path| format!("system_u:object_r:container_file_t:s0:c123,c456 {path}"))
+            .join("\n");
+        assert_eq!(stdout(&output).trim(), expected);
+    }
+}
+
+#[test]
 fn container_env() {
     let output = run_ok(
         cfsrun()
