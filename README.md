@@ -9,6 +9,16 @@ repositories using [crun](https://github.com/containers/crun), without
 requiring podman's full runtime infrastructure or persistent state
 tracking.
 
+Use `--pull` to check the registry and download a missing or updated image
+(requires `skopeo` in PATH):
+
+```bash
+target/debug/cfsrun --pull registry.fedoraproject.org/fedora:40
+```
+
+Without `--pull`, images must already be in the repository. With `--pull`, a
+registry error is reported even if an older image is available locally.
+
 ### Features
 
 - Mostly CLI-compatible with `podman run`
@@ -48,6 +58,7 @@ cfsrun [OPTIONS] <IMAGE> [-- <CMD>...]
 
 Options:
   --repo <PATH>           Path to composefs repository
+  --pull                  Check the registry and pull a missing or updated image
   -t, --tty               Allocate a pseudo-TTY
   -e, --env <KEY=VALUE>   Set environment variables
   -u, --user <UID[:GID]>  Override user

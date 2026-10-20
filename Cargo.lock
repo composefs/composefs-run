@@ -411,6 +411,8 @@ dependencies = [
  "rustix",
  "serde",
  "serde_json",
+ "tar",
+ "tokio",
 ]
 
 [[package]]

@@ -9,6 +9,7 @@ mod userns;
 
 use std::os::unix::fs::DirBuilderExt;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::{Context, Result, ensure};
 use clap::{CommandFactory, Parser};
@@ -294,6 +295,10 @@ pub(crate) struct Cli {
     #[clap(long)]
     repo: Option<PathBuf>,
 
+    /// Check the registry and pull the image if missing or updated (requires skopeo)
+    #[clap(long, conflicts_with = "rootfs")]
+    pull: bool,
+
     /// Mount the rootfs read-only
     #[clap(long)]
     read_only: bool,
@@ -448,7 +453,12 @@ fn main() -> Result<()> {
         }
     } else {
         let repo = ResolvedRepo::open(&repo_path)?;
-        repo.resolve_image(cli.image.as_deref().context("No image specified")?)?
+        let image = cli.image.as_deref().context("No image specified")?;
+        if cli.pull {
+            repo.pull_image(image)?
+        } else {
+            repo.resolve_image(image)?
+        }
     };
 
     let container_dir = PathBuf::from(format!("/var/tmp/cfsrun-{container_id}"));
@@ -486,6 +496,22 @@ pub(crate) enum ResolvedRepo {
 }
 
 impl ResolvedRepo {
+    fn pull_image(self, image: &str) -> Result<ResolvedImage> {
+        ensure!(
+            !image.starts_with('@'),
+            "--pull requires a registry image reference, not a local @digest"
+        );
+        let source = format!(
+            "docker://{}",
+            image.strip_prefix("docker://").unwrap_or(image)
+        );
+        let runtime = tokio::runtime::Runtime::new().context("Creating image pull runtime")?;
+        match self {
+            Self::Sha256(repo) => runtime.block_on(pull_image_typed(repo, &source, image)),
+            Self::Sha512(repo) => runtime.block_on(pull_image_typed(repo, &source, image)),
+        }
+    }
+
     fn open(repo_path: &std::path::Path) -> Result<Self> {
         let repo_fd = match rustix::fs::open(
             repo_path,
@@ -550,6 +576,18 @@ pub(crate) struct ResolvedImage {
     pub(crate) erofs_hex: Option<String>,
 }
 
+async fn pull_image_typed<ObjectID: FsVerityHashValue>(
+    repo: Repository<ObjectID>,
+    source: &str,
+    reference: &str,
+) -> Result<ResolvedImage> {
+    let repo = Arc::new(repo);
+    composefs_oci::pull(&repo, source, Some(reference), Default::default())
+        .await
+        .with_context(|| format!("Pulling image {source}"))?;
+    resolve_image_typed(&repo, reference)
+}
+
 fn resolve_image_typed<ObjectID: FsVerityHashValue>(
     repo: &Repository<ObjectID>,
     image: &str,
@@ -576,6 +614,86 @@ fn resolve_image_typed<ObjectID: FsVerityHashValue>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pull_missing_unchanged_and_updated_image() -> Result<()> {
+        let dir = std::env::temp_dir().join(format!("cfsrun-pull-test-{}", std::process::id()));
+        std::fs::create_dir(&dir)?;
+        let result = (|| -> Result<()> {
+            let layout = dir.join("layout");
+            let blobs = layout.join("blobs/sha256");
+            std::fs::create_dir_all(&blobs)?;
+            std::fs::write(layout.join("oci-layout"), r#"{"imageLayoutVersion":"1.0.0"}"#)?;
+            let mut layer = tar::Builder::new(Vec::new());
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(tar::EntryType::Directory);
+            header.set_mode(0o755);
+            header.set_size(0);
+            header.set_cksum();
+            layer.append_data(&mut header, "usr", std::io::empty())?;
+            let layer = layer.into_inner()?;
+            let layer_digest = composefs_oci::sha256_content_digest(&layer).to_string();
+            std::fs::write(blobs.join(layer_digest.strip_prefix("sha256:").unwrap()), &layer)?;
+            let repo_path = dir.join("repo");
+            Repository::<Sha256HashValue>::init_path(
+                CWD,
+                &repo_path,
+                RepositoryConfig::default().set_insecure(),
+            )?;
+            let runtime = tokio::runtime::Runtime::new()?;
+            let source = format!("oci:{}", layout.display());
+            let mut previous_erofs = None;
+            for command in ["first", "first", "updated"] {
+                let config = serde_json::to_vec(&serde_json::json!({
+                    "architecture": "amd64", "os": "linux",
+                    "config": {"Cmd": [command]},
+                    "rootfs": {"type": "layers", "diff_ids": [&layer_digest]}
+                }))?;
+                let config_digest = composefs_oci::sha256_content_digest(&config).to_string();
+                std::fs::write(blobs.join(config_digest.strip_prefix("sha256:").unwrap()), &config)?;
+                let manifest = serde_json::to_vec(&serde_json::json!({
+                    "schemaVersion": 2,
+                    "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                    "config": {"mediaType": "application/vnd.oci.image.config.v1+json",
+                        "digest": config_digest, "size": config.len()},
+                    "layers": [{"mediaType": "application/vnd.oci.image.layer.v1.tar",
+                        "digest": &layer_digest, "size": layer.len()}]
+                }))?;
+                let digest = composefs_oci::sha256_content_digest(&manifest).to_string();
+                std::fs::write(blobs.join(digest.strip_prefix("sha256:").unwrap()), &manifest)?;
+                std::fs::write(layout.join("index.json"), serde_json::to_vec(&serde_json::json!({
+                    "schemaVersion": 2,
+                    "manifests": [{"mediaType": "application/vnd.oci.image.manifest.v1+json",
+                        "digest": digest, "size": manifest.len()}]
+                }))?)?;
+                let repo = Repository::<Sha256HashValue>::open_path(CWD, &repo_path)?;
+                let image = runtime.block_on(pull_image_typed(repo, &source, "test"))?;
+                assert_eq!(
+                    image.oci_config.config().as_ref().unwrap().cmd().as_ref().unwrap(),
+                    &[command]
+                );
+                assert!(image.erofs_hex.is_some());
+                if let Some(previous) = previous_erofs {
+                    assert_eq!(image.erofs_hex, previous);
+                }
+                previous_erofs = Some(image.erofs_hex);
+            }
+            Ok(())
+        })();
+        std::fs::remove_dir_all(&dir)?;
+        result
+    }
+
+    #[test]
+    fn pull_cli() {
+        assert!(
+            Cli::try_parse_from(["cfsrun", "--pull", "example.com/image:tag"])
+                .unwrap()
+                .pull
+        );
+        assert!(!Cli::try_parse_from(["cfsrun", "local"]).unwrap().pull);
+        assert!(Cli::try_parse_from(["cfsrun", "--pull", "--rootfs", "/tmp"]).is_err());
+    }
 
     #[test]
     fn open_repository() -> Result<()> {
