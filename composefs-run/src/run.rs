@@ -285,6 +285,9 @@ fn mount_rootfs_with_erofs(
     let repo = crate::ResolvedRepo::open(repo_path)?;
 
     let mut mount_options = MountOptions::default();
+    if let Some(label) = mount_label {
+        mount_options.set_selinux_context(label);
+    }
     if !read_only {
         let upper = overlay_dir.join("upper");
         let work = overlay_dir.join("work");
