@@ -10,7 +10,7 @@ use clap::Parser;
 use composefs::mount::MountOptions;
 use oci_spec::runtime::{
     Capability, HookBuilder, HooksBuilder, LinuxBuilder, LinuxCapabilitiesBuilder, LinuxNamespace,
-    LinuxNamespaceType, MountBuilder, ProcessBuilder, RootBuilder, Spec, UserBuilder,
+    LinuxNamespaceType, Mount, MountBuilder, ProcessBuilder, RootBuilder, Spec, UserBuilder,
 };
 use rustix::fs::{CWD, Mode, OFlags};
 use rustix::mount::{
@@ -115,7 +115,7 @@ pub fn run(
         cli.tty
     };
 
-    let spec = build_runtime_spec(
+    let (mut spec, optional_mounts) = build_runtime_spec(
         cli,
         oci_config,
         container_id,
@@ -162,6 +162,14 @@ pub fn run(
             mount_label,
         )?;
     }
+
+    let rootfs = rustix::fs::open(
+        &rootfs_dir,
+        OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .context("Opening mounted rootfs")?;
+    add_optional_mounts(&mut spec, optional_mounts, &rootfs)?;
 
     let config_json = serde_json::to_string_pretty(&spec)?;
     fs::write(bundle_dir.join("config.json"), &config_json)?;
@@ -500,7 +508,7 @@ fn generate_etc_config(
     dns_search: &[String],
     dns_option: &[String],
     mount_label: Option<&str>,
-) -> Result<Vec<oci_spec::runtime::Mount>> {
+) -> Result<Vec<Mount>> {
     // /etc/hostname
     let hostname_path = bundle_dir.join("hostname");
     fs::write(&hostname_path, format!("{hostname}\n"))?;
@@ -590,6 +598,36 @@ fn generate_etc_config(
     Ok(mounts)
 }
 
+fn mountpoint_exists(rootfs: impl AsFd, destination: &Path) -> Result<bool> {
+    // Resolve absolute symlinks relative to the container root, as crun does.
+    match rustix::fs::openat2(
+        rootfs,
+        destination,
+        OFlags::PATH | OFlags::CLOEXEC,
+        Mode::empty(),
+        rustix::fs::ResolveFlags::IN_ROOT | rustix::fs::ResolveFlags::NO_MAGICLINKS,
+    ) {
+        Ok(_) => Ok(true),
+        Err(rustix::io::Errno::NOENT) => Ok(false),
+        Err(err) => {
+            Err(err).with_context(|| format!("Checking mountpoint {}", destination.display()))
+        }
+    }
+}
+
+fn add_optional_mounts(
+    spec: &mut Spec,
+    optional_mounts: Vec<Mount>,
+    rootfs: impl AsFd,
+) -> Result<()> {
+    for mount in optional_mounts {
+        if mountpoint_exists(rootfs.as_fd(), mount.destination())? {
+            spec.mounts_mut().get_or_insert_with(Vec::new).push(mount);
+        }
+    }
+    Ok(())
+}
+
 /// Read the host's resolv.conf, following through stub resolvers to the real config.
 fn read_host_resolv_conf() -> String {
     let content = fs::read_to_string("/etc/resolv.conf").unwrap_or_default();
@@ -633,7 +671,7 @@ fn build_runtime_spec(
     netns_path: Option<&Path>,
     container_ip: Option<std::net::IpAddr>,
     pasta_pid: Option<i32>,
-) -> Result<Spec> {
+) -> Result<(Spec, Vec<Mount>)> {
     use std::collections::HashSet;
 
     // ── Resolve image + CLI into effective values ───────────────────────
@@ -1006,7 +1044,7 @@ fn build_runtime_spec(
         );
     }
 
-    // /etc config bind mounts (hostname, hosts, resolv.conf)
+    // /etc config files (hostname, hosts, resolv.conf)
     // When using pasta networking, default DNS to pasta's DNS forwarder.
     // For bridge networking, use the host's resolv.conf (default).
     let dns: Vec<String> = if cli.dns.is_empty() && *network == NetworkMode::Pasta {
@@ -1023,7 +1061,13 @@ fn build_runtime_spec(
         &cli.dns_option,
         mount_label.as_deref(),
     )?;
-    mounts.extend(etc_mounts);
+    let optional_mounts = if cli.read_only {
+        // Missing bind targets cannot be created on a read-only rootfs.
+        etc_mounts
+    } else {
+        mounts.extend(etc_mounts);
+        Vec::new()
+    };
 
     if let Some(ref path) = init_path {
         mounts.push(
@@ -1076,7 +1120,7 @@ fn build_runtime_spec(
         );
     }
 
-    Ok(spec)
+    Ok((spec, optional_mounts))
 }
 
 fn parse_capability(s: &str) -> Result<Capability> {
@@ -1206,6 +1250,99 @@ fn add_device_to_spec(spec: &mut Spec, src: &Path, dst: &Path, perms: &str) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn missing_etc_mounts() -> Result<()> {
+        let dir =
+            std::env::temp_dir().join(format!("cfsrun-mountpoints-test-{}", std::process::id()));
+        fs::create_dir(&dir)?;
+        let result = (|| -> Result<()> {
+            let names = ["hostname", "hosts", "resolv.conf"];
+            for (case, existing) in [
+                ("no-etc", vec![]),
+                ("none", vec![]),
+                ("partial", vec!["hosts"]),
+                ("all", names.to_vec()),
+            ] {
+                for read_only in [false, true] {
+                    let bundle = dir.join(format!("{case}-{read_only}"));
+                    let rootfs = bundle.join("rootfs");
+                    fs::create_dir_all(&rootfs)?;
+                    if case != "no-etc" {
+                        fs::create_dir(rootfs.join("etc"))?;
+                    }
+                    for name in &existing {
+                        fs::write(rootfs.join("etc").join(name), "original\n")?;
+                    }
+                    let mut cli = Cli::try_parse_from([
+                        "cfsrun",
+                        "--no-init",
+                        "--privileged",
+                        "test",
+                        "--",
+                        "true",
+                    ])?;
+                    cli.read_only = read_only;
+                    let (mut spec, optional_mounts) = build_runtime_spec(
+                        &cli,
+                        &oci_spec::image::Config::default(),
+                        "test-container",
+                        &dir,
+                        &bundle,
+                        false,
+                        true,
+                        &NetworkMode::Host,
+                        None,
+                        None,
+                        None,
+                    )?;
+                    assert_eq!(optional_mounts.len(), if read_only { 3 } else { 0 });
+                    assert_eq!(spec.root().as_ref().unwrap().readonly(), Some(read_only));
+                    let rootfs_fd = rustix::fs::open(
+                        &rootfs,
+                        OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC,
+                        Mode::empty(),
+                    )?;
+                    add_optional_mounts(&mut spec, optional_mounts, &rootfs_fd)?;
+                    let mounts: Vec<_> = spec
+                        .mounts()
+                        .as_ref()
+                        .unwrap()
+                        .iter()
+                        .filter(|mount| mount.destination().parent() == Some(Path::new("/etc")))
+                        .collect();
+
+                    let expected = if read_only {
+                        existing.as_slice()
+                    } else {
+                        &names
+                    };
+                    let destinations: Vec<_> = mounts
+                        .iter()
+                        .map(|mount| mount.destination().clone())
+                        .collect();
+                    assert_eq!(
+                        destinations,
+                        expected
+                            .iter()
+                            .map(|name| Path::new("/etc").join(name))
+                            .collect::<Vec<_>>()
+                    );
+                    for name in names {
+                        assert!(bundle.join(name).is_file());
+                        let target = rootfs.join("etc").join(name);
+                        assert_eq!(target.exists(), existing.contains(&name));
+                        if target.exists() {
+                            assert_eq!(fs::read_to_string(target)?, "original\n");
+                        }
+                    }
+                }
+            }
+            Ok(())
+        })();
+        fs::remove_dir_all(&dir)?;
+        result
+    }
 
     #[test]
     fn generated_etc_config() -> Result<()> {
