@@ -54,17 +54,6 @@ pub fn run(
     composefs::mount::mount_at(bundle_tmpfs, CWD, &bundle_dir).context("Attaching bundle tmpfs")?;
     let rootfs_dir = bundle_dir.join("rootfs");
 
-    // ── Rootfs ──────────────────────────────────────────────────────
-
-    if let Some(ref rootfs) = cli.rootfs {
-        // --rootfs: skip composefs, use the directory directly
-        mount_rootfs_from_path(rootfs, &rootfs_dir, overlay_dir, cli.read_only, rootless)?;
-    } else if rootless {
-        mount_rootfs_with_fuse(repo_path, image, &rootfs_dir, overlay_dir, cli.read_only)?;
-    } else {
-        mount_rootfs_with_erofs(repo_path, image, &rootfs_dir, overlay_dir, cli.read_only)?;
-    }
-
     // ── Networking ──────────────────────────────────────────────────────
 
     let default_network = if rootless {
@@ -140,6 +129,40 @@ pub fn run(
         pasta_pid,
     )?;
 
+    let mount_label = spec
+        .linux()
+        .as_ref()
+        .and_then(|linux| linux.mount_label().as_deref());
+
+    if let Some(ref rootfs) = cli.rootfs {
+        mount_rootfs_from_path(
+            rootfs,
+            &rootfs_dir,
+            overlay_dir,
+            cli.read_only,
+            rootless,
+            mount_label,
+        )?;
+    } else if rootless {
+        mount_rootfs_with_fuse(
+            repo_path,
+            image,
+            &rootfs_dir,
+            overlay_dir,
+            cli.read_only,
+            mount_label,
+        )?;
+    } else {
+        mount_rootfs_with_erofs(
+            repo_path,
+            image,
+            &rootfs_dir,
+            overlay_dir,
+            cli.read_only,
+            mount_label,
+        )?;
+    }
+
     let config_json = serde_json::to_string_pretty(&spec)?;
     fs::write(bundle_dir.join("config.json"), &config_json)?;
 
@@ -184,6 +207,15 @@ pub fn cleanup() -> Result<()> {
     Ok(())
 }
 
+/// Label the upper and work directories before overlayfs caches their labels
+/// at mount time. The label must match the runtime spec, including its MCS.
+fn label_overlay_dirs(overlay_dir: &Path, mount_label: Option<&str>) -> Result<()> {
+    for name in ["upper", "work"] {
+        selinux::label_path(&overlay_dir.join(name), mount_label)?;
+    }
+    Ok(())
+}
+
 /// Mount a composefs image via FUSE (rootless).
 fn mount_rootfs_with_fuse(
     repo_path: &Path,
@@ -191,6 +223,7 @@ fn mount_rootfs_with_fuse(
     rootfs_dir: &Path,
     overlay_dir: &Path,
     read_only: bool,
+    mount_label: Option<&str>,
 ) -> Result<()> {
     let dev_fuse = composefs_fuse::open_fuse().context("Opening /dev/fuse")?;
     let fuse_fd_num = dev_fuse.as_raw_fd();
@@ -216,6 +249,7 @@ fn mount_rootfs_with_fuse(
         let work = overlay_dir.join("work");
         fs::create_dir(&upper).with_context(|| format!("Creating {}", upper.display()))?;
         fs::create_dir(&work).with_context(|| format!("Creating {}", work.display()))?;
+        label_overlay_dirs(overlay_dir, mount_label)?;
 
         let upper_fd = rustix::fs::open(
             &upper,
@@ -246,6 +280,7 @@ fn mount_rootfs_with_erofs(
     rootfs_dir: &Path,
     overlay_dir: &Path,
     read_only: bool,
+    mount_label: Option<&str>,
 ) -> Result<()> {
     let repo = crate::ResolvedRepo::open(repo_path)?;
 
@@ -255,6 +290,7 @@ fn mount_rootfs_with_erofs(
         let work = overlay_dir.join("work");
         fs::create_dir(&upper).with_context(|| format!("Creating {}", upper.display()))?;
         fs::create_dir(&work).with_context(|| format!("Creating {}", work.display()))?;
+        label_overlay_dirs(overlay_dir, mount_label)?;
 
         let upper_fd = rustix::fs::open(
             &upper,
@@ -284,6 +320,7 @@ fn mount_rootfs_from_path(
     overlay_dir: &Path,
     read_only: bool,
     userxattr: bool,
+    mount_label: Option<&str>,
 ) -> Result<()> {
     if read_only {
         rustix::mount::mount_bind(rootfs, target)
@@ -297,13 +334,20 @@ fn mount_rootfs_from_path(
             target,
             overlay_dir,
             userxattr,
+            mount_label,
         )?;
     }
     Ok(())
 }
 
 /// Mount an overlay filesystem with the given lower directory path.
-fn mount_overlay(lowerdir: &str, target: &Path, overlay_dir: &Path, userxattr: bool) -> Result<()> {
+fn mount_overlay(
+    lowerdir: &str,
+    target: &Path,
+    overlay_dir: &Path,
+    userxattr: bool,
+    mount_label: Option<&str>,
+) -> Result<()> {
     let upper = overlay_dir.join("upper");
     let work = overlay_dir.join("work");
     fs::create_dir(&upper)
@@ -324,6 +368,7 @@ fn mount_overlay(lowerdir: &str, target: &Path, overlay_dir: &Path, userxattr: b
             }
         })
         .with_context(|| format!("Creating {}", work.display()))?;
+    label_overlay_dirs(overlay_dir, mount_label)?;
 
     let overlay = composefs::mount::FsHandle::open("overlay").context("fsopen(overlay)")?;
     rustix::mount::fsconfig_set_string(overlay.as_fd(), "lowerdir", lowerdir)?;
