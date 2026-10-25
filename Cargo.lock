@@ -312,10 +312,35 @@ checksum = "1c133bc6a41be0d194c306b5506d15e6feeea7b1d6604bd3f8310dfb2ca96486"
 [[package]]
 name = "composefs"
 version = "0.9.4"
+source = "git+https://github.com/containers/composefs-rs?rev=0f9e1f00411178ea404a742a0688dd5664aed7fa#0f9e1f00411178ea404a742a0688dd5664aed7fa"
+dependencies = [
+ "anyhow",
+ "composefs-ioctls 0.9.4 (git+https://github.com/containers/composefs-rs?rev=0f9e1f00411178ea404a742a0688dd5664aed7fa)",
+ "fn-error-context",
+ "hex",
+ "log",
+ "once_cell",
+ "openssl",
+ "rand 0.10.3",
+ "rustix",
+ "serde",
+ "serde_json",
+ "serde_repr",
+ "thiserror",
+ "tokio",
+ "tokio-stream",
+ "xxhash-rust",
+ "zerocopy",
+ "zstd 0.14.3",
+]
+
+[[package]]
+name = "composefs"
+version = "0.9.4"
 source = "git+https://github.com/containers/composefs-rs?rev=3280e06f562c732205bf4d832809ac8a0fde4ad3#3280e06f562c732205bf4d832809ac8a0fde4ad3"
 dependencies = [
  "anyhow",
- "composefs-ioctls",
+ "composefs-ioctls 0.9.4 (git+https://github.com/containers/composefs-rs?rev=3280e06f562c732205bf4d832809ac8a0fde4ad3)",
  "fn-error-context",
  "hex",
  "log",
@@ -341,13 +366,22 @@ version = "0.9.4"
 source = "git+https://github.com/containers/composefs-rs?rev=3280e06f562c732205bf4d832809ac8a0fde4ad3#3280e06f562c732205bf4d832809ac8a0fde4ad3"
 dependencies = [
  "anyhow",
- "composefs",
+ "composefs 0.9.4 (git+https://github.com/containers/composefs-rs?rev=3280e06f562c732205bf4d832809ac8a0fde4ad3)",
  "fuser",
  "log",
  "memmap2",
  "rustix",
  "tempfile",
  "zerocopy",
+]
+
+[[package]]
+name = "composefs-ioctls"
+version = "0.9.4"
+source = "git+https://github.com/containers/composefs-rs?rev=0f9e1f00411178ea404a742a0688dd5664aed7fa#0f9e1f00411178ea404a742a0688dd5664aed7fa"
+dependencies = [
+ "rustix",
+ "thiserror",
 ]
 
 [[package]]
@@ -369,7 +403,7 @@ dependencies = [
  "base64",
  "bytes",
  "cap-std-ext",
- "composefs",
+ "composefs 0.9.4 (git+https://github.com/containers/composefs-rs?rev=3280e06f562c732205bf4d832809ac8a0fde4ad3)",
  "composefs-splitdirfdstream",
  "composefs-storage",
  "containers-image-proxy",
@@ -399,7 +433,7 @@ dependencies = [
  "anyhow",
  "clap",
  "clap_complete",
- "composefs",
+ "composefs 0.9.4 (git+https://github.com/containers/composefs-rs?rev=0f9e1f00411178ea404a742a0688dd5664aed7fa)",
  "composefs-fuse",
  "composefs-oci",
  "env_logger",
