@@ -15,7 +15,7 @@ build-release:
 
 # Run unit tests only (no container image needed)
 test-unit:
-    cargo test --bin cfsrun
+    cargo test --lib --bin cfsrun
 
 # Run integration tests (pulls test image on first run, requires cfsctl)
 test-integration: build
