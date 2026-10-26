@@ -39,7 +39,7 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace -- -D warnings
       - name: Unit tests
-        run: cargo test --bin cfsrun
+        run: cargo test --lib --bin cfsrun
       - name: Build cfsrun
         run: cargo build
       - name: Build cfsctl
