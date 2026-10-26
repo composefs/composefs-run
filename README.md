@@ -67,6 +67,7 @@ Options:
   --device <PATH[:PATH[:PERMS]]>  Add host device
   --read-only             Read-only rootfs
   --overlay-dir <PATH>    Persistent overlay directory
+  --commit <REF>          Save the run's changes as a new image
   --network <MODE>        host|pasta|bridge|private
   --hostname <NAME>       Container hostname
   --privileged            Full capabilities, no seccomp/SELinux
@@ -76,6 +77,25 @@ Options:
   -p, --publish <H:C>     Port forwarding
   --add-host <HOST:IP>    Extra /etc/hosts entries
 ```
+
+### Committing a run
+
+```bash
+cfsrun --repo /tmp/repo --commit updated cs10 -- sh -c 'echo hello > /hello'
+cfsrun --repo /tmp/repo updated -- cat /hello
+```
+
+Use `--commit <REF>` to save the container's changes as a new image in the same
+repository. The new image is based on the image used to start the container and
+keeps its default configuration.
+
+Changes are saved after the container exits, including when its command fails.
+cfsrun preserves the container's exit status even if saving the image fails.
+In that case, it reports an error and keeps the writable directory for recovery.
+Detailed diagnostics may be saved to a log at the reported path.
+
+`--commit` cannot be combined with `--read-only` or `--rootfs`. Changes to bind
+mounts and temporary filesystems are excluded.
 
 ### Testing
 

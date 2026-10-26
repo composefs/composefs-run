@@ -7,6 +7,8 @@ mod seccomp;
 mod selinux;
 mod userns;
 
+use composefs_run::{commit, overlay};
+
 use std::os::unix::fs::DirBuilderExt;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -36,6 +38,30 @@ pub(crate) struct CleanupArgs {
     /// PID of the pasta process to kill on cleanup
     #[clap(long)]
     pasta_pid: Option<i32>,
+
+    /// Destination ref for a poststop commit
+    #[clap(long, value_parser = parse_commit_ref, requires_all = ["commit_repo", "commit_parent", "commit_upper", "commit_command"])]
+    commit: Option<String>,
+
+    /// Repository containing the parent and destination images
+    #[clap(long, requires = "commit")]
+    commit_repo: Option<PathBuf>,
+
+    /// Digest of the image used to start the container
+    #[clap(long, requires = "commit")]
+    commit_parent: Option<OciDigest>,
+
+    /// Upper directory to read after container exit
+    #[clap(long, requires = "commit")]
+    commit_upper: Option<PathBuf>,
+
+    /// JSON file containing the resolved workload arguments
+    #[clap(long, requires = "commit")]
+    commit_command: Option<PathBuf>,
+
+    /// Read overlay metadata from the user namespace of xattrs
+    #[clap(long, requires = "commit")]
+    commit_userxattr: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -311,6 +337,10 @@ pub(crate) struct Cli {
     #[clap(long)]
     overlay_dir: Option<PathBuf>,
 
+    /// Commit the overlay changes as a child OCI image at this repository ref
+    #[clap(long, value_name = "REF", conflicts_with_all = ["read_only", "rootfs"], value_parser = parse_commit_ref)]
+    commit: Option<String>,
+
     /// Bind mount a host directory into the container (-v HOST:CONTAINER[:ro])
     #[clap(short = 'v', long = "volume", value_parser = clap::value_parser!(VolumeSpec))]
     volumes: Vec<VolumeSpec>,
@@ -416,6 +446,18 @@ pub(crate) struct Cli {
     cmd: Vec<String>,
 }
 
+fn parse_commit_ref(value: &str) -> Result<String, String> {
+    if value.is_empty()
+        || value.starts_with('@')
+        || value
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == "..")
+    {
+        return Err("commit ref must be a nonempty repository name without @ prefix, empty, . or .. components".into());
+    }
+    Ok(value.into())
+}
+
 fn main() -> Result<()> {
     env_logger::init();
     clap_complete::CompleteEnv::with_factory(Cli::command).complete();
@@ -451,6 +493,7 @@ fn main() -> Result<()> {
         ResolvedImage {
             oci_config: oci_spec::image::ImageConfiguration::default(),
             erofs_hex: None,
+            manifest_digest: None,
         }
     } else {
         let repo = ResolvedRepo::open(&repo_path)?;
@@ -483,7 +526,7 @@ fn main() -> Result<()> {
         &image,
     );
 
-    if result.is_err() {
+    if result.is_err() && cli.commit.is_none() {
         let _ = std::fs::remove_dir_all(&container_dir);
     }
 
@@ -574,6 +617,7 @@ impl ResolvedRepo {
 pub(crate) struct ResolvedImage {
     pub(crate) oci_config: oci_spec::image::ImageConfiguration,
     pub(crate) erofs_hex: Option<String>,
+    pub(crate) manifest_digest: Option<OciDigest>,
 }
 
 async fn pull_image_typed<ObjectID: FsVerityHashValue>(
@@ -608,6 +652,7 @@ fn resolve_image_typed<ObjectID: FsVerityHashValue>(
     Ok(ResolvedImage {
         oci_config: config.config,
         erofs_hex: Some(erofs_id.to_hex()),
+        manifest_digest: Some(img.manifest_digest().clone()),
     })
 }
 
@@ -704,6 +749,23 @@ mod tests {
         })();
         std::fs::remove_dir_all(&dir)?;
         result
+    }
+
+    #[test]
+    fn commit_cli_validation() {
+        use clap::Parser;
+        let cli =
+            crate::Cli::try_parse_from(["cfsrun", "--commit", "derived:latest", "base"]).unwrap();
+        assert_eq!(cli.commit.as_deref(), Some("derived:latest"));
+        for args in [
+            vec!["--read-only", "--commit", "child", "base"],
+            vec!["--rootfs", "/tmp", "--commit", "child"],
+            vec!["--commit", "../escape", "base"],
+            vec!["--commit", "@digest", "base"],
+            vec!["--commit", "", "base"],
+        ] {
+            assert!(crate::Cli::try_parse_from(std::iter::once("cfsrun").chain(args)).is_err());
+        }
     }
 
     #[test]

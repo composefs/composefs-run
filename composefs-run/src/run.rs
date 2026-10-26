@@ -9,8 +9,9 @@ use anyhow::{Context, Result, ensure};
 use clap::Parser;
 use composefs::mount::MountOptions;
 use oci_spec::runtime::{
-    Capability, HookBuilder, HooksBuilder, LinuxBuilder, LinuxCapabilitiesBuilder, LinuxNamespace,
-    LinuxNamespaceType, Mount, MountBuilder, ProcessBuilder, RootBuilder, Spec, UserBuilder,
+    Capability, Hook, HookBuilder, HooksBuilder, LinuxBuilder, LinuxCapabilitiesBuilder,
+    LinuxNamespace, LinuxNamespaceType, Mount, MountBuilder, ProcessBuilder, RootBuilder, Spec,
+    UserBuilder,
 };
 use rustix::fs::{CWD, Mode, OFlags};
 use rustix::mount::{
@@ -20,7 +21,7 @@ use rustix::mount::{
 
 use crate::{
     CleanupArgs, Cli, HostEntry, NetworkMode, PortSpec, ResolvedImage, SeccompPolicy, SystemdMode,
-    UserSpec, fuse, netavark, seccomp, selinux, userns,
+    UserSpec, commit, fuse, netavark, overlay, seccomp, selinux, userns,
 };
 
 pub fn run(
@@ -115,18 +116,15 @@ pub fn run(
         cli.tty
     };
 
-    let (mut spec, optional_mounts) = build_runtime_spec(
+    let (mut spec, optional_mounts, command) = build_runtime_spec(
         cli,
         oci_config,
         container_id,
-        container_dir,
         &bundle_dir,
         tty,
         rootless,
         &network,
         netns_path.as_deref(),
-        container_ip,
-        pasta_pid,
     )?;
 
     let mount_label = spec
@@ -170,23 +168,249 @@ pub fn run(
     )
     .context("Opening mounted rootfs")?;
     add_optional_mounts(&mut spec, optional_mounts, &rootfs)?;
+    drop(rootfs);
 
+    let mut cleanup_args = CleanupArgs {
+        container_dir: Some(container_dir.to_owned()),
+        container_id: Some(container_id.to_owned()),
+        container_ip,
+        pasta_pid,
+        commit: cli.commit.clone(),
+        commit_repo: None,
+        commit_parent: None,
+        commit_upper: None,
+        commit_command: None,
+        commit_userxattr: cli.commit.is_some() && rootless,
+    };
+    if cli.commit.is_some() {
+        // Keep argv in a file: a single quoted history argument can exceed
+        // Linux's per-argument exec limit even when the workload argv is valid.
+        let command_path = container_dir.join("command.json");
+        fs::write(&command_path, serde_json::to_vec(&command)?)?;
+        cleanup_args.commit_command = Some(command_path);
+        // Hooks run with the bundle as cwd, so pass absolute paths and the
+        // resolved parent digest rather than the possibly changing source ref.
+        cleanup_args.commit_repo = Some(fs::canonicalize(repo_path)?);
+        cleanup_args.commit_upper = Some(fs::canonicalize(overlay_dir.join("upper"))?);
+        cleanup_args.commit_parent = Some(
+            image
+                .manifest_digest
+                .clone()
+                .context("Missing parent OCI manifest")?,
+        );
+        // crun opens hook stderr as a separate append-only file description.
+        // Sockets cannot be reopened. A non-append regular file has a separate
+        // offset, allowing crun's later writes to overwrite the hook's output.
+        let stderr = std::io::stderr();
+        let kind = rustix::fs::FileType::from_raw_mode(rustix::fs::fstat(stderr.as_fd())?.st_mode);
+        let flags = rustix::fs::fcntl_getfl(stderr.as_fd())?;
+        let safe = kind != rustix::fs::FileType::Socket
+            && (kind != rustix::fs::FileType::RegularFile || flags.contains(OFlags::APPEND));
+        let hook_stderr = if safe {
+            match rustix::fs::open(
+                "/proc/self/fd/2",
+                OFlags::WRONLY | OFlags::APPEND | OFlags::CLOEXEC,
+                Mode::empty(),
+            ) {
+                Ok(_) => Some(PathBuf::from("/proc/self/fd/2")),
+                Err(error) => {
+                    eprintln!("Cannot reopen stderr for commit diagnostics: {error}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let hook_stderr = hook_stderr.unwrap_or_else(|| {
+            let log = container_dir.join("commit.log");
+            eprintln!(
+                "Commit diagnostics retained at {} if committing fails",
+                log.display()
+            );
+            log
+        });
+        let mut annotations = spec.annotations().clone().unwrap_or_default();
+        annotations.insert(
+            "run.oci.hooks.stderr".into(),
+            hook_stderr
+                .to_str()
+                .context("Non-UTF-8 hook log path")?
+                .into(),
+        );
+        spec.set_annotations(Some(annotations));
+    }
+    spec.set_hooks(Some(
+        HooksBuilder::default()
+            .poststop(vec![cleanup_hook(&cleanup_args)?])
+            .build()?,
+    ));
     let config_json = serde_json::to_string_pretty(&spec)?;
     fs::write(bundle_dir.join("config.json"), &config_json)?;
 
     let err = Command::new("crun")
         .arg("run")
         .arg("--bundle")
-        .arg(bundle_dir)
+        .arg(&bundle_dir)
         .arg(container_id)
         .exec();
     Err(err).context("Failed to exec crun")
 }
 
-/// OCI poststop hook: unmount and remove the container state directory.
+/// Construct the poststop invocation, leaving commit hooks without a timeout.
+fn cleanup_hook(args: &CleanupArgs) -> Result<Hook> {
+    let mut hook_args = vec!["cfsrun".into(), "--internal-cleanup".into()];
+    if let Some(dir) = &args.container_dir {
+        hook_args.extend([
+            "--container-dir".into(),
+            dir.to_str()
+                .context("Non-UTF-8 container directory")?
+                .into(),
+        ]);
+    }
+    if let Some(id) = &args.container_id {
+        hook_args.extend(["--container-id".into(), id.clone()]);
+    }
+    if let Some(ip) = args.container_ip {
+        hook_args.extend(["--container-ip".into(), ip.to_string()]);
+    }
+    if let Some(pid) = args.pasta_pid {
+        hook_args.extend(["--pasta-pid".into(), pid.to_string()]);
+    }
+    if let Some(reference) = &args.commit {
+        hook_args.push(format!("--commit={reference}"));
+        if args.commit_userxattr {
+            hook_args.push("--commit-userxattr".into());
+        }
+        hook_args.extend([
+            "--commit-command".into(),
+            args.commit_command
+                .as_ref()
+                .context("Missing workload command file")?
+                .to_str()
+                .context("Non-UTF-8 workload command path")?
+                .into(),
+            "--commit-repo".into(),
+            args.commit_repo
+                .as_ref()
+                .context("Missing commit repository")?
+                .to_str()
+                .context("Non-UTF-8 repository path")?
+                .into(),
+            "--commit-parent".into(),
+            args.commit_parent
+                .as_ref()
+                .context("Missing commit parent")?
+                .to_string(),
+            "--commit-upper".into(),
+            args.commit_upper
+                .as_ref()
+                .context("Missing commit upper directory")?
+                .to_str()
+                .context("Non-UTF-8 upper path")?
+                .into(),
+        ]);
+    }
+    let mut builder = HookBuilder::default()
+        .path(std::env::current_exe().context("Resolving own binary path")?)
+        .args(hook_args);
+    if args.commit.is_none() {
+        builder = builder.timeout(10);
+    }
+    Ok(builder.build()?)
+}
+
+/// OCI poststop hook: release runtime resources, optionally commit, then remove
+/// container state. A failed commit leaves the upper available for recovery.
 pub fn cleanup() -> Result<()> {
     let args =
         CleanupArgs::parse_from(std::iter::once("cleanup".into()).chain(std::env::args().skip(2)));
+    cleanup_container(&args, args.commit.is_some())?;
+    if let Some(reference) = &args.commit {
+        let upper = args
+            .commit_upper
+            .as_ref()
+            .context("Missing commit upper directory")?;
+        let digest = commit_upper(&args).with_context(|| {
+            format!(
+                "Committing changes; overlay retained at {}",
+                upper.display()
+            )
+        })?;
+        eprintln!("Committed {reference}: {digest}");
+        if let Some(dir) = &args.container_dir {
+            fs::remove_dir_all(dir).context("Removing committed container state")?;
+        }
+    }
+    Ok(())
+}
+
+fn commit_upper(args: &CleanupArgs) -> Result<composefs_oci::OciDigest> {
+    let repo = crate::ResolvedRepo::open(
+        args.commit_repo
+            .as_ref()
+            .context("Missing commit repository")?,
+    )?;
+    let digest = args
+        .commit_parent
+        .as_ref()
+        .context("Missing commit parent")?;
+    let upper = args
+        .commit_upper
+        .as_ref()
+        .context("Missing commit upper directory")?;
+    let reference = args.commit.as_deref().context("Missing commit reference")?;
+    let command_path = args
+        .commit_command
+        .as_ref()
+        .context("Missing workload command file")?;
+    let command: Vec<String> = serde_json::from_slice(
+        &fs::read(command_path).context("Reading workload command for history")?,
+    )
+    .context("Decoding workload command for history")?;
+    let created_by = shlex::try_join(command.iter().map(String::as_str))
+        .context("Formatting workload command for history")?;
+    let namespace = if args.commit_userxattr {
+        overlay::XattrNamespace::User
+    } else {
+        overlay::XattrNamespace::Trusted
+    };
+    let runtime = tokio::runtime::Runtime::new()?;
+    async fn commit<H: composefs::fsverity::FsVerityHashValue>(
+        repo: composefs::repository::Repository<H>,
+        digest: &composefs_oci::OciDigest,
+        upper: &Path,
+        reference: &str,
+        created_by: &str,
+        namespace: overlay::XattrNamespace,
+    ) -> Result<composefs_oci::OciDigest> {
+        let repo = std::sync::Arc::new(repo);
+        let parent = composefs_oci::OciImage::open(&repo, digest, None)?;
+        let parent_fs = parent.read_filesystem(&repo, false)?;
+        let upper = overlay::read_upper(&repo, upper, namespace).await?;
+        let layer = overlay::normalize(&repo, &parent_fs, upper, namespace)?;
+        commit::create_image(&repo, &parent, &layer, reference, created_by)
+    }
+    match repo {
+        crate::ResolvedRepo::Sha256(repo) => runtime.block_on(commit(
+            repo,
+            digest,
+            upper,
+            reference,
+            &created_by,
+            namespace,
+        )),
+        crate::ResolvedRepo::Sha512(repo) => runtime.block_on(commit(
+            repo,
+            digest,
+            upper,
+            reference,
+            &created_by,
+            namespace,
+        )),
+    }
+}
+
+fn cleanup_container(args: &CleanupArgs, keep_overlay: bool) -> Result<()> {
     if let Some(dir) = &args.container_dir {
         ensure!(
             dir.parent() == Some(Path::new("/var/tmp"))
@@ -210,7 +434,11 @@ pub fn cleanup() -> Result<()> {
         }
         let bundle = dir.join("bundle");
         let _ = rustix::mount::unmount(&bundle, rustix::mount::UnmountFlags::DETACH);
-        let _ = fs::remove_dir_all(dir);
+        if keep_overlay {
+            let _ = fs::remove_dir(dir.join("bundle"));
+        } else {
+            let _ = fs::remove_dir_all(dir);
+        }
     }
     Ok(())
 }
@@ -658,35 +886,39 @@ fn is_systemd_command(args: &[String]) -> bool {
         .unwrap_or(false)
 }
 
+/// Resolve the workload before adding the optional init wrapper.
+fn resolve_command(cli: &Cli, config: &oci_spec::image::Config) -> Result<Vec<String>> {
+    let args = if cli.cmd.is_empty() {
+        let mut args = config.entrypoint().clone().unwrap_or_default();
+        args.extend(config.cmd().clone().unwrap_or_default());
+        args
+    } else {
+        cli.cmd.clone()
+    };
+    ensure!(
+        !args.is_empty(),
+        "No entrypoint or cmd in image config and no command specified"
+    );
+    Ok(args)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_runtime_spec(
     cli: &Cli,
     oci_config: &oci_spec::image::Config,
     container_id: &str,
-    container_dir: &Path,
     bundle_dir: &Path,
     tty: bool,
     rootless: bool,
     network: &NetworkMode,
     netns_path: Option<&Path>,
-    container_ip: Option<std::net::IpAddr>,
-    pasta_pid: Option<i32>,
-) -> Result<(Spec, Vec<Mount>)> {
+) -> Result<(Spec, Vec<Mount>, Vec<String>)> {
     use std::collections::HashSet;
 
     // ── Resolve image + CLI into effective values ───────────────────────
 
-    let mut args = if cli.cmd.is_empty() {
-        let mut args = oci_config.entrypoint().clone().unwrap_or_default();
-        args.extend(oci_config.cmd().clone().unwrap_or_default());
-        ensure!(
-            !args.is_empty(),
-            "No entrypoint or cmd in image config and no command specified"
-        );
-        args
-    } else {
-        cli.cmd.clone()
-    };
+    let command = resolve_command(cli, oci_config)?;
+    let mut args = command.clone();
 
     let mut env: Vec<String> = oci_config.env().clone().unwrap_or_else(|| {
         vec!["PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".into()]
@@ -850,7 +1082,7 @@ fn build_runtime_spec(
         .build()?;
 
     let mut process = ProcessBuilder::default()
-        .args(args.clone())
+        .args(args)
         .env(env)
         .cwd(&cwd)
         .terminal(tty)
@@ -1087,40 +1319,13 @@ fn build_runtime_spec(
 
     spec.set_mounts(Some(mounts));
 
-    // Poststop hook: unmount bundle and clean up the container directory
-    {
-        let self_exe = std::env::current_exe().context("Resolving own binary path")?;
-        let mut hook_args = vec![
-            "cfsrun".into(),
-            "--internal-cleanup".into(),
-            "--container-dir".into(),
-            container_dir.display().to_string(),
-            "--container-id".into(),
-            container_id.into(),
-        ];
-        if let Some(ip) = container_ip {
-            hook_args.push("--container-ip".into());
-            hook_args.push(ip.to_string());
-        }
-        if let Some(pid) = pasta_pid {
-            hook_args.push("--pasta-pid".into());
-            hook_args.push(pid.to_string());
-        }
-        let hook = HookBuilder::default()
-            .path(self_exe)
-            .args(hook_args)
-            .timeout(10)
-            .build()?;
-        spec.set_hooks(Some(HooksBuilder::default().poststop(vec![hook]).build()?));
-    }
-
     if !cli.publish.is_empty() && host_network {
         eprintln!(
             "note: --publish has no effect with --network=host (ports are already accessible)"
         );
     }
 
-    Ok((spec, optional_mounts))
+    Ok((spec, optional_mounts, command))
 }
 
 fn parse_capability(s: &str) -> Result<Capability> {
@@ -1252,6 +1457,147 @@ mod tests {
     use super::*;
 
     #[test]
+    fn resolved_history_command() -> Result<()> {
+        let cases = [
+            (
+                vec!["/entrypoint"],
+                vec!["--default", "two words"],
+                vec![],
+                vec!["/entrypoint", "--default", "two words"],
+            ),
+            (
+                vec![],
+                vec!["image-command", ""],
+                vec![],
+                vec!["image-command", ""],
+            ),
+            (vec!["/entrypoint"], vec![], vec![], vec!["/entrypoint"]),
+            (
+                vec!["/entrypoint"],
+                vec!["default"],
+                vec![
+                    "sh",
+                    "-c",
+                    "printf '%s\\n' \"$@\"",
+                    "",
+                    "single'quote",
+                    "line\nbreak",
+                ],
+                vec![
+                    "sh",
+                    "-c",
+                    "printf '%s\\n' \"$@\"",
+                    "",
+                    "single'quote",
+                    "line\nbreak",
+                ],
+            ),
+        ];
+        for (entrypoint, defaults, overrides, expected) in cases {
+            let config = oci_spec::image::ConfigBuilder::default()
+                .entrypoint(entrypoint.into_iter().map(String::from).collect::<Vec<_>>())
+                .cmd(defaults.into_iter().map(String::from).collect::<Vec<_>>())
+                .build()?;
+            for no_init in [false, true] {
+                let mut cli = Cli::try_parse_from(
+                    ["cfsrun", "image", "--"]
+                        .into_iter()
+                        .chain(overrides.iter().copied()),
+                )?;
+                cli.no_init = no_init;
+                let command = resolve_command(&cli, &config)?;
+                assert_eq!(command, expected);
+                let created_by = shlex::try_join(command.iter().map(String::as_str))?;
+                assert_eq!(shlex::split(&created_by).unwrap(), command);
+            }
+        }
+        let cli = Cli::try_parse_from(["cfsrun", "image"])?;
+        assert!(resolve_command(&cli, &oci_spec::image::Config::default()).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn cleanup_hook_arguments_and_timeout() -> Result<()> {
+        let mut args = CleanupArgs::try_parse_from([
+            "cleanup",
+            "--container-dir",
+            "/var/tmp/cfsrun-test",
+            "--container-id",
+            "test",
+            "--container-ip",
+            "10.0.0.2",
+            "--pasta-pid",
+            "123",
+        ])?;
+        assert_eq!(cleanup_hook(&args)?.timeout(), Some(10));
+        args.commit = Some("--result".into());
+        args.commit_repo = Some(PathBuf::from("/repo with spaces"));
+        args.commit_upper = Some(PathBuf::from("/upper with spaces"));
+        args.commit_parent = Some(format!("sha256:{}", "ab".repeat(32)).parse()?);
+        args.commit_command = Some(PathBuf::from("/command with spaces.json"));
+        for userxattr in [false, true] {
+            args.commit_userxattr = userxattr;
+            let hook = cleanup_hook(&args)?;
+            let parsed = CleanupArgs::try_parse_from(
+                std::iter::once("cleanup").chain(
+                    hook.args()
+                        .as_ref()
+                        .unwrap()
+                        .iter()
+                        .skip(2)
+                        .map(String::as_str),
+                ),
+            )?;
+            assert_eq!(parsed.commit_userxattr, userxattr);
+        }
+        let hook = cleanup_hook(&args)?;
+        assert_eq!(hook.timeout(), None);
+        let parsed = CleanupArgs::try_parse_from(
+            std::iter::once("cleanup").chain(
+                hook.args()
+                    .as_ref()
+                    .unwrap()
+                    .iter()
+                    .skip(2)
+                    .map(String::as_str),
+            ),
+        )?;
+        assert_eq!(parsed.commit, args.commit);
+        assert_eq!(parsed.commit_repo, args.commit_repo);
+        assert_eq!(parsed.commit_upper, args.commit_upper);
+        assert_eq!(parsed.commit_parent, args.commit_parent);
+        assert_eq!(parsed.commit_command, args.commit_command);
+        assert_eq!(parsed.container_dir, args.container_dir);
+        assert_eq!(parsed.container_id, args.container_id);
+        assert_eq!(parsed.container_ip, args.container_ip);
+        assert_eq!(parsed.pasta_pid, args.pasta_pid);
+        for missing in [
+            "--commit-repo",
+            "--commit-parent",
+            "--commit-upper",
+            "--commit-command",
+        ] {
+            let mut incomplete = vec!["cleanup"];
+            let values = hook.args().as_ref().unwrap();
+            let mut iter = values.iter().skip(2);
+            while let Some(value) = iter.next() {
+                if value == missing {
+                    iter.next();
+                } else if value.starts_with(&format!("{missing}=")) {
+                    continue;
+                } else {
+                    incomplete.push(value);
+                }
+            }
+            assert!(
+                CleanupArgs::try_parse_from(incomplete).is_err(),
+                "missing {missing}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn missing_etc_mounts() -> Result<()> {
         let dir =
             std::env::temp_dir().join(format!("cfsrun-mountpoints-test-{}", std::process::id()));
@@ -1283,19 +1629,17 @@ mod tests {
                         "true",
                     ])?;
                     cli.read_only = read_only;
-                    let (mut spec, optional_mounts) = build_runtime_spec(
+                    let (mut spec, optional_mounts, command) = build_runtime_spec(
                         &cli,
                         &oci_spec::image::Config::default(),
                         "test-container",
-                        &dir,
                         &bundle,
                         false,
                         true,
                         &NetworkMode::Host,
                         None,
-                        None,
-                        None,
                     )?;
+                    assert_eq!(command, ["true"]);
                     assert_eq!(optional_mounts.len(), if read_only { 3 } else { 0 });
                     assert_eq!(spec.root().as_ref().unwrap().readonly(), Some(read_only));
                     let rootfs_fd = rustix::fs::open(
