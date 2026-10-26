@@ -74,6 +74,21 @@ fn stdout(output: &Output) -> String {
     String::from_utf8_lossy(&output.stdout).to_string()
 }
 
+fn remove_retained_overlay(path: &Path) {
+    if is_root() {
+        std::fs::remove_dir_all(path).unwrap();
+    } else {
+        // Overlayfs work directories can have mode 000. Re-enter a user
+        // namespace to recover the permissions held by the original runner.
+        let status = Command::new("unshare")
+            .args(["--user", "--map-root-user", "--", "rm", "-rf", "--"])
+            .arg(path)
+            .status()
+            .unwrap();
+        assert!(status.success(), "Removing test overlay {}", path.display());
+    }
+}
+
 // ── Tests for both rootless and rootful ─────────────────────────────────
 
 #[test]
@@ -109,6 +124,330 @@ fn exit_code() {
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(42));
+}
+
+#[test]
+fn commit_run_and_reuse_image() {
+    let first = format!("commit-base-{}", std::process::id());
+    let child = format!("commit-child-{}", std::process::id());
+    let first_script = "mkdir -p /commit-old/sub; printf original > /commit-old/sub/file; printf remove > /commit-delete; printf metadata > /commit-meta; ln /commit-meta /commit-alias";
+    let second_script = "chmod 600 /commit-meta; mv /commit-old /commit-new; mv /commit-delete /commit-written; printf changed > /commit-written; rm /commit-new/sub/file; printf new > /commit-new/new; exit 42";
+    let mut command = Command::new(env!("CARGO_BIN_EXE_cfsrun"));
+    command
+        .current_dir(repo().parent().unwrap())
+        .arg("--repo")
+        .arg(repo().file_name().unwrap());
+    let output = run_ok(command.args([
+        "--network",
+        "host",
+        "--privileged",
+        "--commit",
+        &first,
+        IMAGE,
+        "--",
+        "sh",
+        "-ec",
+        first_script,
+    ]));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains(&format!("Committed {first}: sha256:")),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let output = cfsrun()
+        .args([
+            "--network",
+            "host",
+            "--no-init",
+            "--privileged",
+            "--commit",
+            &child,
+            &first,
+            "--",
+            "sh",
+            "-ec",
+            second_script,
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(42),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    for (image, script) in [(&first, first_script), (&child, second_script)] {
+        let output = Command::new(cfsctl())
+            .arg("--repo")
+            .arg(repo())
+            .args(["oci", "inspect", "--config", image])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let config: oci_spec::image::ImageConfiguration =
+            serde_json::from_slice(&output.stdout).unwrap();
+        let created_by = config
+            .history()
+            .as_ref()
+            .unwrap()
+            .last()
+            .unwrap()
+            .created_by()
+            .as_deref()
+            .unwrap();
+        assert_eq!(shlex::split(created_by).unwrap(), ["sh", "-ec", script]);
+    }
+    let output = run_ok(cfsrun().args(["--network", "host", "--no-init", "--privileged", &child, "--", "sh", "-ec",
+        "test ! -e /commit-old; test ! -e /commit-delete; test ! -e /commit-new/sub/file; test -d /commit-new/sub; test \"$(cat /commit-meta)\" = metadata; test \"$(stat -c %a /commit-meta)\" = 600; test \"$(cat /commit-written)\" = changed; cat /commit-new/new"]));
+    assert_eq!(stdout(&output), "new");
+    let output = run_ok(cfsrun().args([
+        "--network",
+        "host",
+        "--no-init",
+        "--privileged",
+        &first,
+        "--",
+        "cat",
+        "/commit-old/sub/file",
+    ]));
+    assert_eq!(stdout(&output), "original");
+}
+
+#[test]
+fn commit_large_command_history() {
+    let reference = format!("commit-large-command-{}", std::process::id());
+    let args = vec!["x".repeat(1024); 200];
+    run_ok(
+        cfsrun()
+            .args([
+                "--network",
+                "host",
+                "--no-init",
+                "--privileged",
+                "--commit",
+                &reference,
+                IMAGE,
+                "--",
+                "true",
+            ])
+            .args(&args),
+    );
+    let output = Command::new(cfsctl())
+        .arg("--repo")
+        .arg(repo())
+        .args(["oci", "inspect", "--config", &reference])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let config: oci_spec::image::ImageConfiguration =
+        serde_json::from_slice(&output.stdout).unwrap();
+    let created_by = config
+        .history()
+        .as_ref()
+        .unwrap()
+        .last()
+        .unwrap()
+        .created_by()
+        .as_deref()
+        .unwrap();
+    assert!(created_by.len() > 128 * 1024);
+    let mut expected = vec!["true".to_owned()];
+    expected.extend(args);
+    assert_eq!(shlex::split(created_by).unwrap(), expected);
+}
+
+#[test]
+fn commit_failure_retains_upper_and_exit_status() {
+    for persistent in [false, true] {
+        for status in [0, 42] {
+            // Match the runner's storage: /tmp can itself be overlayfs in CI.
+            let overlay = tempfile::tempdir_in("/var/tmp").unwrap();
+            let reference = format!("commit-failed-{}-{persistent}-{status}", std::process::id());
+            let mut command = cfsrun();
+            if persistent {
+                command
+                    .current_dir(overlay.path().parent().unwrap())
+                    .arg("--overlay-dir")
+                    .arg(overlay.path().file_name().unwrap());
+            }
+            command
+                .args([
+                    "--network",
+                    "host",
+                    "--no-init",
+                    "--privileged",
+                    "--commit",
+                    &reference,
+                    IMAGE,
+                    "--",
+                    "sh",
+                    "-ec",
+                    &format!("printf recovery > /.wh.reserved; exit {status}"),
+                ])
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped());
+            let child = command.spawn().unwrap();
+            let container_dir = PathBuf::from(format!("/var/tmp/cfsrun-composefs-{}", child.id()));
+            let output = child.wait_with_output().unwrap();
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert_eq!(output.status.code(), Some(status), "{stderr}");
+            assert!(stderr.contains("OCI reserves filename"), "{stderr}");
+            let upper = if persistent {
+                overlay.path().join("upper")
+            } else {
+                container_dir.join("upper")
+            };
+            assert!(
+                stderr.contains(&format!("overlay retained at {}", upper.display())),
+                "{stderr}"
+            );
+            assert_eq!(
+                std::fs::read(upper.join(".wh.reserved")).unwrap(),
+                b"recovery"
+            );
+            assert!(!container_dir.join("bundle").exists());
+            assert!(
+                !cfsrun()
+                    .args(["--network", "host", &reference, "--", "true"])
+                    .output()
+                    .unwrap()
+                    .status
+                    .success()
+            );
+            remove_retained_overlay(&container_dir);
+            if persistent {
+                remove_retained_overlay(overlay.path());
+            }
+        }
+    }
+}
+
+#[test]
+fn commit_socket_stderr() {
+    use std::{
+        io::Read,
+        os::{fd::OwnedFd, unix::net::UnixStream},
+        process::Stdio,
+    };
+    for fail in [false, true] {
+        let reference = format!("commit-socket-{}-{fail}", std::process::id());
+        let (mut reader, writer) = UnixStream::pair().unwrap();
+        let writer: OwnedFd = writer.into();
+        let mut command = cfsrun();
+        command
+            .args([
+                "--network",
+                "host",
+                "--no-init",
+                "--privileged",
+                "--commit",
+                &reference,
+                IMAGE,
+                "--",
+                "sh",
+                "-ec",
+                if fail {
+                    "printf recovery > /.wh.reserved"
+                } else {
+                    "printf success > /commit-socket"
+                },
+            ])
+            .stderr(Stdio::from(writer))
+            .stdout(Stdio::piped());
+        let child = command.spawn().unwrap();
+        drop(command);
+        let container_dir = PathBuf::from(format!("/var/tmp/cfsrun-composefs-{}", child.id()));
+        let status = child.wait_with_output().unwrap().status;
+        let mut stderr = String::new();
+        reader.read_to_string(&mut stderr).unwrap();
+        assert_eq!(status.code(), Some(0), "{stderr}");
+        let log = container_dir.join("commit.log");
+        assert!(stderr.contains(log.to_str().unwrap()), "{stderr}");
+        if fail {
+            let diagnostics = std::fs::read_to_string(log).unwrap();
+            assert!(
+                diagnostics.contains("OCI reserves filename"),
+                "{diagnostics}"
+            );
+            assert!(container_dir.join("upper/.wh.reserved").exists());
+            remove_retained_overlay(&container_dir);
+        } else {
+            assert!(!container_dir.exists());
+            let output = run_ok(cfsrun().args([
+                "--network",
+                "host",
+                "--no-init",
+                "--privileged",
+                &reference,
+                "--",
+                "cat",
+                "/commit-socket",
+            ]));
+            assert_eq!(stdout(&output), "success");
+        }
+    }
+}
+
+#[test]
+fn commit_file_stderr() {
+    use std::process::Stdio;
+    for append in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let stderr = temp.path().join("stderr.log");
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .append(append)
+            .truncate(!append)
+            .open(&stderr)
+            .unwrap();
+        let reference = format!("commit-file-{}-{append}", std::process::id());
+        let mut command = cfsrun();
+        command
+            .args([
+                "--network",
+                "host",
+                "--no-init",
+                "--privileged",
+                "--commit",
+                &reference,
+                IMAGE,
+                "--",
+                "sh",
+                "-ec",
+                "printf recovery > /.wh.reserved",
+            ])
+            .stderr(Stdio::from(file))
+            .stdout(Stdio::piped());
+        let child = command.spawn().unwrap();
+        drop(command);
+        let container_dir = PathBuf::from(format!("/var/tmp/cfsrun-composefs-{}", child.id()));
+        let status = child.wait_with_output().unwrap().status;
+        assert_eq!(status.code(), Some(0));
+        let output = std::fs::read_to_string(stderr).unwrap();
+        let diagnostics = if append {
+            output.clone()
+        } else {
+            let log = container_dir.join("commit.log");
+            assert!(output.contains(log.to_str().unwrap()), "{output}");
+            std::fs::read_to_string(log).unwrap()
+        };
+        assert!(
+            diagnostics.contains("OCI reserves filename"),
+            "{diagnostics}"
+        );
+        assert!(output.contains("poststop hook failed"), "{output}");
+        assert!(container_dir.join("upper/.wh.reserved").exists());
+        remove_retained_overlay(&container_dir);
+    }
 }
 
 #[test]

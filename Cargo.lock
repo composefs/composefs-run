@@ -409,6 +409,7 @@ dependencies = [
  "rustix",
  "serde",
  "serde_json",
+ "shlex",
  "tar",
  "tar-core",
  "tempfile",
