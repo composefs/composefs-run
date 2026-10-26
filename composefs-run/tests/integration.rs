@@ -5,6 +5,8 @@
 //!
 //! Requires `cfsctl` in $PATH (or set CFSCTL env var).
 //! On first run, pulls quay.io/centos/centos:stream10 into a test repo.
+//! Set CFSRUN_TEST_REPO to a prepared repository containing the `test` image
+//! to avoid a registry pull.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -20,7 +22,9 @@ fn cfsctl() -> String {
 
 fn repo() -> &'static Path {
     TEST_REPO.get_or_init(|| {
-        let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("test-repo");
+        let dir = std::env::var_os("CFSRUN_TEST_REPO")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("test-repo"));
         if !dir.join("meta.json").exists() {
             let status = Command::new(cfsctl())
                 .args(["init", "--insecure"])
