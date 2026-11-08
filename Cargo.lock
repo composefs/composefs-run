@@ -315,7 +315,32 @@ version = "0.9.4"
 source = "git+https://github.com/containers/composefs-rs?rev=3280e06f562c732205bf4d832809ac8a0fde4ad3#3280e06f562c732205bf4d832809ac8a0fde4ad3"
 dependencies = [
  "anyhow",
- "composefs-ioctls",
+ "composefs-ioctls 0.9.4",
+ "fn-error-context",
+ "hex",
+ "log",
+ "once_cell",
+ "openssl",
+ "rand 0.10.3",
+ "rustix",
+ "serde",
+ "serde_json",
+ "serde_repr",
+ "thiserror",
+ "tokio",
+ "tokio-stream",
+ "xxhash-rust",
+ "zerocopy",
+ "zstd 0.14.3",
+]
+
+[[package]]
+name = "composefs"
+version = "0.10.0"
+source = "git+https://github.com/containers/composefs-rs?rev=e36102dc30b6d2f1ff4126c37b8675748c704bcf#e36102dc30b6d2f1ff4126c37b8675748c704bcf"
+dependencies = [
+ "anyhow",
+ "composefs-ioctls 0.10.0",
  "fn-error-context",
  "hex",
  "log",
@@ -341,7 +366,7 @@ version = "0.9.4"
 source = "git+https://github.com/containers/composefs-rs?rev=3280e06f562c732205bf4d832809ac8a0fde4ad3#3280e06f562c732205bf4d832809ac8a0fde4ad3"
 dependencies = [
  "anyhow",
- "composefs",
+ "composefs 0.9.4",
  "fuser",
  "log",
  "memmap2",
@@ -360,16 +385,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "composefs-ioctls"
+version = "0.10.0"
+source = "git+https://github.com/containers/composefs-rs?rev=e36102dc30b6d2f1ff4126c37b8675748c704bcf#e36102dc30b6d2f1ff4126c37b8675748c704bcf"
+dependencies = [
+ "rustix",
+ "thiserror",
+]
+
+[[package]]
 name = "composefs-oci"
-version = "0.9.4"
-source = "git+https://github.com/containers/composefs-rs?rev=3280e06f562c732205bf4d832809ac8a0fde4ad3#3280e06f562c732205bf4d832809ac8a0fde4ad3"
+version = "0.10.0"
+source = "git+https://github.com/containers/composefs-rs?rev=e36102dc30b6d2f1ff4126c37b8675748c704bcf#e36102dc30b6d2f1ff4126c37b8675748c704bcf"
 dependencies = [
  "anyhow",
  "async-compression",
  "base64",
  "bytes",
  "cap-std-ext",
- "composefs",
+ "composefs 0.10.0",
  "composefs-splitdirfdstream",
  "composefs-storage",
  "containers-image-proxy",
@@ -383,6 +417,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tar-core",
+ "tempfile",
  "thiserror",
  "tokio",
  "tokio-util",
@@ -400,7 +435,7 @@ dependencies = [
  "chrono",
  "clap",
  "clap_complete",
- "composefs",
+ "composefs 0.9.4",
  "composefs-fuse",
  "composefs-oci",
  "env_logger",
@@ -418,8 +453,8 @@ dependencies = [
 
 [[package]]
 name = "composefs-splitdirfdstream"
-version = "0.9.4"
-source = "git+https://github.com/containers/composefs-rs?rev=3280e06f562c732205bf4d832809ac8a0fde4ad3#3280e06f562c732205bf4d832809ac8a0fde4ad3"
+version = "0.10.0"
+source = "git+https://github.com/containers/composefs-rs?rev=e36102dc30b6d2f1ff4126c37b8675748c704bcf#e36102dc30b6d2f1ff4126c37b8675748c704bcf"
 dependencies = [
  "openssl",
  "rand 0.10.3",
@@ -431,8 +466,8 @@ dependencies = [
 
 [[package]]
 name = "composefs-storage"
-version = "0.9.4"
-source = "git+https://github.com/containers/composefs-rs?rev=3280e06f562c732205bf4d832809ac8a0fde4ad3#3280e06f562c732205bf4d832809ac8a0fde4ad3"
+version = "0.10.0"
+source = "git+https://github.com/containers/composefs-rs?rev=e36102dc30b6d2f1ff4126c37b8675748c704bcf#e36102dc30b6d2f1ff4126c37b8675748c704bcf"
 dependencies = [
  "anyhow",
  "base64",
@@ -522,9 +557,9 @@ dependencies = [
 
 [[package]]
 name = "containers-image-proxy"
-version = "0.11.0"
+version = "0.11.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a3246dd5271aa01ab3d2a5346ef5059ff158e135d59da2d5d3a27954c6704f2c"
+checksum = "c4002d7772063a418d9cd5fe413b9fdd8af154ed34606251fde4d4c722234b60"
 dependencies = [
  "cap-std-ext",
  "futures-util",
@@ -2343,6 +2378,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "550a2b930b62486a393c52d5c3b84bff264b28aa437ed64694d31e93b1757af7"
 
 [[package]]
+name = "zcheapstr"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "939f186d9ecebe044315a5cb6d6f78568bbc21152adc954d5a0c2f58bdbc9920"
+
+[[package]]
 name = "zerocopy"
 version = "0.8.63"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2370,9 +2411,9 @@ checksum = "b268e58e7c693d7c271f93ffc4ba3b380412554231c85bf61ca7af91042a4112"
 
 [[package]]
 name = "zlink"
-version = "0.7.1"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "706aa8f0ed19681e7e95291fdea930a10485257820999797c2eb3051b22e888b"
+checksum = "198be428106fe2987e3c014daadf976120909f4a765587341c9d4c2624912d61"
 dependencies = [
  "zlink-core",
  "zlink-smol",
@@ -2381,9 +2422,9 @@ dependencies = [
 
 [[package]]
 name = "zlink-core"
-version = "0.7.1"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8f77dd6d1dc0520a668f5640fef2d51dc39df22a939e7c827019d0a2edafe3cc"
+checksum = "24a314bfe2e205db0b9cc286abc09b08f34837a06dd709b10ef7cf28bd622e4f"
 dependencies = [
  "futures-util",
  "itoa",
@@ -2396,34 +2437,46 @@ dependencies = [
  "tracing",
  "zlink-idl",
  "zlink-macros",
+ "zlink-names",
 ]
 
 [[package]]
 name = "zlink-idl"
-version = "0.7.1"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "92b13734a025195596b4d855ddf1e66a5e74533564a7d1b0a8d072dd00e2c6ef"
+checksum = "9beafa91ab0672e1a2adc828cac4163152156d54046a0cad298807e290153ccf"
 dependencies = [
- "winnow 0.7.15",
+ "zlink-names",
 ]
 
 [[package]]
 name = "zlink-macros"
-version = "0.7.1"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c09c588f0c465b5f17ac9ee187b34ca2b73b06c4a67c6170b856387dbede4cc7"
+checksum = "ad68b7baceb8afe7b0b21e408961f6a9d28fe5f10e02b19ef15b7ac3be39fc90"
 dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
- "zlink-idl",
+ "zlink-names",
+]
+
+[[package]]
+name = "zlink-names"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3e2019f3c1186761aee19689ba2f99e659ec7f0d637ad1ee96f22a54434e743a"
+dependencies = [
+ "serde",
+ "winnow 0.7.15",
+ "zcheapstr",
 ]
 
 [[package]]
 name = "zlink-smol"
-version = "0.7.1"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "62c3ee8faa545275ae31816a08455209872da51ef8a3cb46dbe97c9a5f838f34"
+checksum = "43f8b15370cace714c53983a91688004407f897eb1cf9b877b3e9df9330a26aa"
 dependencies = [
  "async-broadcast",
  "async-channel",
@@ -2436,9 +2489,9 @@ dependencies = [
 
 [[package]]
 name = "zlink-tokio"
-version = "0.7.1"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d7fbaa1ec22ae711a158c85220007e8d8c5289591577729679215fce3e960747"
+checksum = "a46c4f9f765ecac29e50b21dc5c73185a2c2885a3d1ca1485ff1a97d96bc1538"
 dependencies = [
  "futures-util",
  "pin-project-lite",
