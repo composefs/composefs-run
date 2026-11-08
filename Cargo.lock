@@ -315,7 +315,7 @@ version = "0.9.4"
 source = "git+https://github.com/containers/composefs-rs?rev=3280e06f562c732205bf4d832809ac8a0fde4ad3#3280e06f562c732205bf4d832809ac8a0fde4ad3"
 dependencies = [
  "anyhow",
- "composefs-ioctls",
+ "composefs-ioctls 0.9.4",
  "fn-error-context",
  "hex",
  "log",
@@ -336,12 +336,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "composefs"
+version = "0.10.0"
+source = "git+https://github.com/containers/composefs-rs?rev=e36102dc30b6d2f1ff4126c37b8675748c704bcf#e36102dc30b6d2f1ff4126c37b8675748c704bcf"
+dependencies = [
+ "anyhow",
+ "composefs-ioctls 0.10.0",
+ "fn-error-context",
+ "hex",
+ "log",
+ "once_cell",
+ "openssl",
+ "rand 0.10.3",
+ "rustix",
+ "serde",
+ "serde_json",
+ "serde_repr",
+ "thiserror",
+ "tokio",
+ "tokio-stream",
+ "xxhash-rust",
+ "zerocopy",
+ "zstd 0.14.3",
+]
+
+[[package]]
 name = "composefs-fuse"
 version = "0.9.4"
 source = "git+https://github.com/containers/composefs-rs?rev=3280e06f562c732205bf4d832809ac8a0fde4ad3#3280e06f562c732205bf4d832809ac8a0fde4ad3"
 dependencies = [
  "anyhow",
- "composefs",
+ "composefs 0.9.4",
  "fuser",
  "log",
  "memmap2",
@@ -360,6 +385,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "composefs-ioctls"
+version = "0.10.0"
+source = "git+https://github.com/containers/composefs-rs?rev=e36102dc30b6d2f1ff4126c37b8675748c704bcf#e36102dc30b6d2f1ff4126c37b8675748c704bcf"
+dependencies = [
+ "rustix",
+ "thiserror",
+]
+
+[[package]]
 name = "composefs-oci"
 version = "0.9.4"
 source = "git+https://github.com/containers/composefs-rs?rev=3280e06f562c732205bf4d832809ac8a0fde4ad3#3280e06f562c732205bf4d832809ac8a0fde4ad3"
@@ -369,7 +403,7 @@ dependencies = [
  "base64",
  "bytes",
  "cap-std-ext",
- "composefs",
+ "composefs 0.9.4",
  "composefs-splitdirfdstream",
  "composefs-storage",
  "containers-image-proxy",
@@ -400,7 +434,7 @@ dependencies = [
  "chrono",
  "clap",
  "clap_complete",
- "composefs",
+ "composefs 0.10.0",
  "composefs-fuse",
  "composefs-oci",
  "env_logger",
