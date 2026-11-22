@@ -8,5 +8,5 @@ license = "Apache-2.0 OR MIT"
 
 [workspace.dependencies]
 composefs = { git = "https://github.com/containers/composefs-rs", rev = "3280e06f562c732205bf4d832809ac8a0fde4ad3" }
-composefs-fuse = { git = "https://github.com/containers/composefs-rs", rev = "3280e06f562c732205bf4d832809ac8a0fde4ad3" }
+composefs-fuse = { git = "https://github.com/containers/composefs-rs", rev = "ed4242a182e9c2cd76640f5da6abda31353d9beb" }
 composefs-oci = { git = "https://github.com/containers/composefs-rs", rev = "3280e06f562c732205bf4d832809ac8a0fde4ad3" }
